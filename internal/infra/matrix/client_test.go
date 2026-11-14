@@ -21,6 +21,7 @@ const (
 	dmRoom = id.RoomID("!dm:hs")
 	group  = id.RoomID("!group:hs")
 	group2 = id.RoomID("!group2:hs")
+	secret = id.RoomID("!secret:hs")
 )
 
 type fakeHS struct {
@@ -77,6 +78,21 @@ func (f *fakeHS) handler() http.Handler {
 				"content": map[string]any{"msgtype": "m.text", "body": "first"}},
 		}})
 	})
+	mux.HandleFunc("/_matrix/client/v3/rooms/{room}/state", func(w http.ResponseWriter, r *http.Request) {
+		state := []map[string]any{}
+		if r.PathValue("room") == string(secret) {
+			state = append(state, map[string]any{
+				"type": "m.room.encryption", "state_key": "", "sender": "@x:hs", "event_id": "$e",
+				"content": map[string]any{"algorithm": "m.megolm.v1.aes-sha2"},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(state)
+	})
+	mux.HandleFunc("/_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"next_batch": "s1", "rooms": map[string]any{"join": map[string]any{
+			string(group): map[string]any{"unread_notifications": map[string]any{"notification_count": 4, "highlight_count": 0}},
+		}}})
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
 		_, _ = w.Write([]byte(`{"event_id":"$sent"}`))
@@ -105,7 +121,6 @@ func newTestClient(t *testing.T, dec decrypter) (*Client, *fakeHS) {
 func TestRoomsNamesDMsAndUnreadOrder(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestClient(t, nil)
-	c.unread[group] = 4
 
 	rooms, err := c.Rooms(context.Background())
 	if err != nil {
@@ -186,5 +201,21 @@ func TestSendAndMarkRead(t *testing.T) {
 	}
 	if len(f.sent) < 2 || !strings.HasSuffix(f.sent[1], "/receipt/m.read/$3") {
 		t.Fatalf("mark read must post an m.read receipt for the latest event: %v", f.sent)
+	}
+}
+
+// An encrypted room must never receive plaintext, even when the client cannot encrypt.
+func TestSendRefusesPlaintextIntoEncryptedRoom(t *testing.T) {
+	t.Parallel()
+	c, f := newTestClient(t, nil)
+
+	_, err := c.Send(context.Background(), secret, "hello")
+	if !errors.Is(err, ErrCannotEncrypt) {
+		t.Fatalf("want ErrCannotEncrypt, got %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sent) != 0 {
+		t.Fatalf("nothing may be sent, got %v", f.sent)
 	}
 }

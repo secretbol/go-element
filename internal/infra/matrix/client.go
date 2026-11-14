@@ -32,9 +32,8 @@ type Client struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu     sync.Mutex
-	unread map[id.RoomID]int
-	names  map[id.RoomID]string
+	mu    sync.Mutex
+	names map[id.RoomID]string
 }
 
 // Open loads the stored session, starts syncing and waits for the first sync,
@@ -51,10 +50,9 @@ func Open(ctx context.Context, dir string) (*Client, error) {
 	cli.DeviceID = s.DeviceID
 
 	c := &Client{
-		cli:    cli,
-		unread: map[id.RoomID]int{},
-		names:  map[id.RoomID]string{},
-		done:   make(chan struct{}),
+		cli:   cli,
+		names: map[id.RoomID]string{},
+		done:  make(chan struct{}),
 	}
 	first := make(chan struct{})
 	var once sync.Once
@@ -62,14 +60,7 @@ func Open(ctx context.Context, dir string) (*Client, error) {
 	if !ok {
 		return nil, errors.New("unexpected syncer type")
 	}
-	syncer.OnSync(func(_ context.Context, resp *mautrix.RespSync, _ string) bool {
-		c.mu.Lock()
-		for room, j := range resp.Rooms.Join {
-			if j.UnreadNotifications != nil {
-				c.unread[room] = j.UnreadNotifications.NotificationCount
-			}
-		}
-		c.mu.Unlock()
+	syncer.OnSync(func(_ context.Context, _ *mautrix.RespSync, _ string) bool {
 		once.Do(func() { close(first) })
 		return true
 	})
@@ -153,6 +144,7 @@ func (c *Client) Rooms(ctx context.Context) ([]Room, error) {
 	if err != nil {
 		return nil, fmt.Errorf("joined rooms: %w", err)
 	}
+	unread := c.unreadCounts(ctx)
 	rooms := make([]Room, 0, len(joined.JoinedRooms))
 	for _, rid := range joined.JoinedRooms {
 		members, err := c.Members(ctx, rid)
@@ -168,9 +160,7 @@ func (c *Client) Rooms(ctx context.Context) ([]Room, error) {
 			}
 		}
 		r.Name = c.roomName(ctx, rid, members)
-		c.mu.Lock()
-		r.Unread = c.unread[rid]
-		c.mu.Unlock()
+		r.Unread = unread[rid]
 		rooms = append(rooms, r)
 	}
 	slices.SortStableFunc(rooms, func(a, b Room) int { return b.Unread - a.Unread })
@@ -346,14 +336,65 @@ func (c *Client) message(ctx context.Context, evt *event.Event) (Message, bool) 
 	return m, true
 }
 
-// Send posts a Markdown message (also sent as HTML), encrypting it when the room is encrypted.
+// ErrCannotEncrypt means the room is encrypted but this client has no way to encrypt for it.
+var ErrCannotEncrypt = errors.New("room is encrypted but encryption is unavailable; refusing to send plaintext")
+
+// Send posts a Markdown message (also sent as HTML). In an encrypted room the
+// message is encrypted, and the call fails rather than ever sending plaintext.
+//
+// The room state is read from the server first: the background sync resumes from
+// a saved position, so the client's state store may never have seen the room's
+// m.room.encryption event or its members, and would treat the room as plaintext.
 func (c *Client) Send(ctx context.Context, rid id.RoomID, markdown string) (id.EventID, error) {
+	encrypted, err := c.loadRoomState(ctx, rid)
+	if err != nil {
+		return "", err
+	}
 	content := format.RenderMarkdown(markdown, true, false)
-	resp, err := c.cli.SendMessageEvent(ctx, rid, event.EventMessage, &content)
+	if !encrypted {
+		resp, err := c.cli.SendMessageEvent(ctx, rid, event.EventMessage, &content)
+		if err != nil {
+			return "", fmt.Errorf("sending to %s: %w", rid, err)
+		}
+		return resp.EventID, nil
+	}
+	if c.crypto == nil {
+		return "", ErrCannotEncrypt
+	}
+	enc, err := c.crypto.Encrypt(ctx, rid, event.EventMessage, &content)
+	if err != nil {
+		return "", fmt.Errorf("encrypting for %s: %w", rid, err)
+	}
+	resp, err := c.cli.SendMessageEvent(ctx, rid, event.EventEncrypted, enc)
 	if err != nil {
 		return "", fmt.Errorf("sending to %s: %w", rid, err)
 	}
 	return resp.EventID, nil
+}
+
+// loadRoomState copies the room's current state (encryption, members, power levels)
+// into the client's state store and reports whether the room is encrypted.
+func (c *Client) loadRoomState(ctx context.Context, rid id.RoomID) (bool, error) {
+	state, err := c.cli.StateAsArray(ctx, rid)
+	if err != nil {
+		return false, fmt.Errorf("room state of %s: %w", rid, err)
+	}
+	encrypted := false
+	for _, evt := range state {
+		if err := evt.Content.ParseRaw(evt.Type); err != nil && !errors.Is(err, event.ErrContentAlreadyParsed) {
+			continue
+		}
+		if evt.Type == event.StateEncryption {
+			encrypted = true
+		}
+		mautrix.UpdateStateStore(ctx, c.cli.StateStore, evt)
+	}
+	if c.cli.StateStore != nil {
+		if err := c.cli.StateStore.MarkMembersFetched(ctx, rid); err != nil {
+			return false, fmt.Errorf("recording members of %s: %w", rid, err)
+		}
+	}
+	return encrypted, nil
 }
 
 // MarkRead marks a room read up to its latest event and returns that event id.
@@ -375,5 +416,28 @@ func (c *Client) MarkRead(ctx context.Context, rid id.RoomID) (id.EventID, error
 // newClient builds a Client on an already-configured mautrix client, without
 // crypto or background sync. It exists for tests against a fake homeserver.
 func newClient(cli *mautrix.Client, dec decrypter) *Client {
-	return &Client{cli: cli, dec: dec, unread: map[id.RoomID]int{}, names: map[id.RoomID]string{}}
+	return &Client{cli: cli, dec: dec, names: map[id.RoomID]string{}}
+}
+
+// countsFilter asks for one event per room and no state: the server leaves out rooms with an empty
+// timeline, and only the per-room counters are wanted.
+const countsFilter = `{"presence":{"types":[]},"account_data":{"types":[]},` +
+	`"room":{"timeline":{"limit":1},"state":{"types":[]},"ephemeral":{"types":[]},"account_data":{"types":[]}}}`
+
+// unreadCounts returns the server's notification count for every joined room.
+// The background sync resumes from a saved position, so it only sees rooms that
+// changed since the last run; a fresh initial sync with an empty filter is the
+// way to get every room's counter. On error it returns no counts.
+func (c *Client) unreadCounts(ctx context.Context) map[id.RoomID]int {
+	out := map[id.RoomID]int{}
+	resp, err := c.cli.SyncRequest(ctx, 0, "", countsFilter, false, event.PresenceOffline)
+	if err != nil {
+		return out
+	}
+	for rid, j := range resp.Rooms.Join {
+		if j.UnreadNotifications != nil {
+			out[rid] = j.UnreadNotifications.NotificationCount
+		}
+	}
+	return out
 }
