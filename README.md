@@ -63,6 +63,7 @@ MCP client ──stdio──▶ go-element mcp ──▶ mautrix client ──HT
 
 - The `goolm` build tag selects pure-Go Olm, so no C library is needed. SQLite (the crypto store) still needs cgo.
 - `import-keys` unlocks secret storage with your recovery key, takes the backup key out of it and imports every session from the latest server-side backup. Run it again later to pick up newer backups.
+- `send` reads the room's state from the server before every send and **refuses to send plaintext into an encrypted room**. (An early build sent plaintext because its state cache had not seen the room's encryption event.)
 - `[undecryptable: ...]` means this device does not have that room key: the message is newer than the last backup and its sender has not shared the key.
 - The recovery key and the session file are as sensitive as your password. Do not put them in a repository.
 
