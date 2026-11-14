@@ -4,6 +4,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,7 +36,7 @@ func Execute() {
 				Sources: cli.EnvVars("GO_ELEMENT_DIR"),
 			},
 		},
-		Commands: []*cli.Command{loginCommand(), mcpCommand(), whoamiCommand(), importKeysCommand()},
+		Commands: []*cli.Command{loginCommand(), mcpCommand(), whoamiCommand(), importKeysCommand(), verifyCommand()},
 	}
 
 	// MCP speaks on stdout, so every log line goes to stderr.
@@ -118,6 +119,45 @@ func importKeysCommand() *cli.Command {
 				return fmt.Errorf("import keys: %w", err)
 			}
 			fmt.Printf("restored keys from backup version %s\n", version)
+			return nil
+		},
+	}
+}
+
+func verifyCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "verify",
+		Usage: "cross-sign this device with the recovery key (env GO_ELEMENT_RECOVERY_KEY, or one line on stdin); --status only reports",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{Name: "status", Usage: "report the verification state and change nothing"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			c, err := matrix.Open(ctx, cmd.String("dir"))
+			if err != nil {
+				return fmt.Errorf("open: %w", err)
+			}
+			defer c.Close()
+			if !cmd.Bool("status") {
+				key := os.Getenv("GO_ELEMENT_RECOVERY_KEY")
+				if key == "" {
+					line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+					if err != nil && line == "" {
+						return fmt.Errorf("reading recovery key from stdin: %w", err)
+					}
+					key = line
+				}
+				if err := c.VerifyWithRecoveryKey(ctx, key); err != nil {
+					return err
+				}
+			}
+			st, err := c.VerificationStatus(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s device %s: cross-signing keys %t, verified %t\n", c.UserID(), c.DeviceID(), st.HasKeys, st.Verified)
+			if !st.Verified {
+				return errors.New("this device is not verified")
+			}
 			return nil
 		},
 	}
