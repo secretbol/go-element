@@ -1,0 +1,30 @@
+---
+version: "2"
+run:
+  build-tags: [goolm]
+linters:
+  default: all
+  disable:
+    - depguard
+    - gomodguard
+    - tagliatelle
+    - varnamelen
+    - wsl
+    - exhaustruct
+    - wsl_v5         # whitespace cop: churn for little signal
+    - nlreturn       # same
+    - lll            # long jsonschema tags and mcp descriptions are clearer on one line
+    - tagalign       # struct tag alignment is cosmetic
+    - mnd            # file modes and small limits are self-explanatory here
+    - err113         # one-off CLI errors; sentinels would never be matched
+    - noinlineerr    # `if err := f(); err != nil` is idiomatic Go
+    - testpackage    # tests use unexported helpers on purpose
+    - funcorder      # method order follows reading order
+    - forbidigo      # the CLI prints results to stdout by design
+    - gocognit       # New registers six tools in sequence; splitting hides the list
+    - funlen         # tool registration reads as one list
+    - goconst        # repeated literals in test fixtures
+    - exhaustruct_v5 # option structs from mautrix/mcp are intentionally partial
+  settings:
+    cyclop:
+      max-complexity: 20 # tool registration and room resolution are flat switch-like code
