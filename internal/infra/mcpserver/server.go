@@ -178,6 +178,7 @@ type matchArgs struct {
 
 type verifyOut struct {
 	matrix.VerificationState
+
 	Verified bool   `json:"verified"`
 	Note     string `json:"note,omitempty"`
 }

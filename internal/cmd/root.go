@@ -147,12 +147,12 @@ func verifyCommand() *cli.Command {
 					key = line
 				}
 				if err := c.VerifyWithRecoveryKey(ctx, key); err != nil {
-					return err
+					return fmt.Errorf("verify: %w", err)
 				}
 			}
 			st, err := c.VerificationStatus(ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("status: %w", err)
 			}
 			fmt.Printf("%s device %s: cross-signing keys %t, verified %t\n", c.UserID(), c.DeviceID(), st.HasKeys, st.Verified)
 			if !st.Verified {
@@ -169,10 +169,13 @@ func listenCommand() *cli.Command {
 		Usage: "wait for a verification request from your other Element session, show the emojis, and confirm on y",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			var l *matrix.Listener
-			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(c *matrix.Client) error {
+			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(ctx context.Context, c *matrix.Client) error {
 				var err error
-				l, err = matrix.Listen(c, askEmojis)
-				return err
+				l, err = matrix.Listen(ctx, c, askEmojis)
+				if err != nil {
+					return fmt.Errorf("listen: %w", err)
+				}
+				return nil
 			})
 			if err != nil {
 				return fmt.Errorf("open: %w", err)
@@ -180,11 +183,11 @@ func listenCommand() *cli.Command {
 			defer c.Close()
 			fmt.Fprintf(os.Stderr, "listening as %s device %s: in Element open Settings > Sessions > go-element > Verify session\n", c.UserID(), c.DeviceID())
 			if err := l.Wait(ctx); err != nil {
-				return err
+				return fmt.Errorf("verification: %w", err)
 			}
 			st, err := c.VerificationStatus(ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("status: %w", err)
 			}
 			fmt.Printf("verification complete, verified %t\n", st.Verified)
 			return nil
@@ -235,13 +238,16 @@ func mcpCommand() *cli.Command {
 		Usage: "serve the MCP tools over stdio",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			var l *matrix.Listener
-			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(c *matrix.Client) error {
+			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(ctx context.Context, c *matrix.Client) error {
 				var err error
 				// stdin carries MCP, so the emoji comparison goes through the verification tools.
-				l, err = matrix.Listen(c, func(ctx context.Context, e []rune, d []string, n []int) (bool, error) {
+				l, err = matrix.Listen(ctx, c, func(ctx context.Context, e []rune, d []string, n []int) (bool, error) {
 					return l.ChannelPrompt()(ctx, e, d, n)
 				})
-				return err
+				if err != nil {
+					return fmt.Errorf("listen: %w", err)
+				}
+				return nil
 			})
 			if err != nil {
 				return fmt.Errorf("open: %w", err)

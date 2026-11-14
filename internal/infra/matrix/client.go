@@ -44,7 +44,7 @@ func Open(ctx context.Context, dir string) (*Client, error) {
 
 // OpenWith is Open, but calls setup after the crypto helper is ready and before
 // syncing starts, so event handlers can be registered without racing the syncer.
-func OpenWith(ctx context.Context, dir string, setup func(*Client) error) (*Client, error) {
+func OpenWith(ctx context.Context, dir string, setup func(context.Context, *Client) error) (*Client, error) {
 	s, err := LoadSession(dir)
 	if err != nil {
 		return nil, err
@@ -83,7 +83,7 @@ func OpenWith(ctx context.Context, dir string, setup func(*Client) error) (*Clie
 	c.dec = helper
 
 	if setup != nil {
-		if err := setup(c); err != nil {
+		if err := setup(ctx, c); err != nil {
 			_ = helper.Close()
 			return nil, fmt.Errorf("setup: %w", err)
 		}

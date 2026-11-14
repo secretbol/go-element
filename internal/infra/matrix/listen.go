@@ -113,10 +113,10 @@ func (l *Listener) ChannelPrompt() SASPrompt {
 
 // Listen registers the verification handlers. Call it from the setup hook of
 // OpenWith, then Wait for the outcome of the first verification.
-func Listen(c *Client, prompt SASPrompt) (*Listener, error) {
+func Listen(ctx context.Context, c *Client, prompt SASPrompt) (*Listener, error) {
 	l := &Listener{c: c, prompt: prompt, done: make(chan error, 1)}
 	l.vh = verificationhelper.NewVerificationHelper(c.cli, c.crypto.Machine(), nil, l, false, false, true)
-	if err := l.vh.Init(context.Background()); err != nil {
+	if err := l.vh.Init(ctx); err != nil {
 		return nil, fmt.Errorf("verification helper: %w", err)
 	}
 	return l, nil
