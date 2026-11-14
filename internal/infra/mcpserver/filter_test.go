@@ -30,7 +30,7 @@ func TestFilterRooms(t *testing.T) {
 func TestNewRegistersTools(t *testing.T) {
 	t.Parallel()
 
-	if New(nil, "test") == nil {
+	if New(nil, nil, "test") == nil {
 		t.Fatal("New returned nil")
 	}
 }

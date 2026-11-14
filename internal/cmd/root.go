@@ -234,13 +234,21 @@ func mcpCommand() *cli.Command {
 		Name:  "mcp",
 		Usage: "serve the MCP tools over stdio",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			c, err := matrix.Open(ctx, cmd.String("dir"))
+			var l *matrix.Listener
+			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(c *matrix.Client) error {
+				var err error
+				// stdin carries MCP, so the emoji comparison goes through the verification tools.
+				l, err = matrix.Listen(c, func(ctx context.Context, e []rune, d []string, n []int) (bool, error) {
+					return l.ChannelPrompt()(ctx, e, d, n)
+				})
+				return err
+			})
 			if err != nil {
 				return fmt.Errorf("open: %w", err)
 			}
 			defer c.Close()
 			slog.Info("serving", "user", c.UserID(), "device", c.DeviceID())
-			if err := mcpserver.New(c, versioninfo.Short()).Run(ctx); err != nil {
+			if err := mcpserver.New(c, l, versioninfo.Short()).Run(ctx); err != nil {
 				return fmt.Errorf("mcp: %w", err)
 			}
 			return nil

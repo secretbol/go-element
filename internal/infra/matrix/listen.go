@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"maunium.net/go/mautrix/crypto/verificationhelper"
 	"maunium.net/go/mautrix/event"
@@ -15,12 +17,98 @@ import (
 // saw the same emojis on the other device.
 type SASPrompt func(ctx context.Context, emojis []rune, descriptions []string, decimals []int) (bool, error)
 
+// answerTimeout is how long a pending emoji comparison waits for Answer.
+const answerTimeout = 5 * time.Minute
+
+// ErrNoPending means no emoji comparison is waiting for an answer.
+var ErrNoPending = errors.New("no emoji comparison is waiting")
+
+// VerificationState is a snapshot of the latest verification, for tools that cannot prompt.
+type VerificationState struct {
+	// Phase is idle, requested, ready, comparing, done or failed.
+	Phase  string   `json:"phase"`
+	Emojis []string `json:"emojis,omitempty"`
+	Error  string   `json:"error,omitempty"`
+}
+
 // Listener answers verification requests from the owner's other devices.
 type Listener struct {
 	c      *Client
 	vh     *verificationhelper.VerificationHelper
 	prompt SASPrompt
 	done   chan error
+
+	mu     sync.Mutex
+	state  VerificationState
+	answer chan bool
+}
+
+func (l *Listener) setState(phase string, emojis []string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.state = VerificationState{Phase: phase, Emojis: emojis}
+	if err != nil {
+		l.state.Error = err.Error()
+	}
+}
+
+// State returns the latest verification state.
+func (l *Listener) State() VerificationState {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state.Phase == "" {
+		return VerificationState{Phase: "idle"}
+	}
+	return l.state
+}
+
+// Answer reports whether the emojis matched, for a ChannelPrompt comparison.
+func (l *Listener) Answer(match bool) error {
+	l.mu.Lock()
+	ch := l.answer
+	l.mu.Unlock()
+	if ch == nil {
+		return ErrNoPending
+	}
+	select {
+	case ch <- match:
+		return nil
+	default:
+		return ErrNoPending
+	}
+}
+
+// ChannelPrompt is a SASPrompt for callers without a terminal: it records the
+// emojis in State and waits for Answer, up to five minutes.
+func (l *Listener) ChannelPrompt() SASPrompt {
+	return func(ctx context.Context, emojis []rune, descriptions []string, _ []int) (bool, error) {
+		shown := make([]string, 0, len(emojis))
+		for i, e := range emojis {
+			d := ""
+			if i < len(descriptions) {
+				d = descriptions[i]
+			}
+			shown = append(shown, string(e)+" "+d)
+		}
+		ch := make(chan bool, 1)
+		l.mu.Lock()
+		l.answer = ch
+		l.mu.Unlock()
+		l.setState("comparing", shown, nil)
+		defer func() {
+			l.mu.Lock()
+			l.answer = nil
+			l.mu.Unlock()
+		}()
+		select {
+		case ok := <-ch:
+			return ok, nil
+		case <-time.After(answerTimeout):
+			return false, errors.New("no answer to the emoji comparison")
+		case <-ctx.Done():
+			return false, fmt.Errorf("emoji comparison: %w", ctx.Err())
+		}
+	}
 }
 
 // Listen registers the verification handlers. Call it from the setup hook of
@@ -45,6 +133,11 @@ func (l *Listener) Wait(ctx context.Context) error {
 }
 
 func (l *Listener) finish(err error) {
+	if err != nil {
+		l.setState("failed", nil, err)
+	} else {
+		l.setState("done", nil, nil)
+	}
 	select {
 	case l.done <- err:
 	default:
@@ -59,6 +152,7 @@ func (l *Listener) VerificationRequested(ctx context.Context, txn id.Verificatio
 		return
 	}
 	slog.Info("verification requested", "device", fromDevice)
+	l.setState("requested", nil, nil)
 	if err := l.vh.AcceptVerification(ctx, txn); err != nil {
 		l.finish(fmt.Errorf("accepting request: %w", err))
 	}
@@ -72,6 +166,7 @@ func (l *Listener) VerificationReady(ctx context.Context, txn id.VerificationTra
 		return
 	}
 	slog.Info("ready, starting emoji verification", "device", other)
+	l.setState("ready", nil, nil)
 	if err := l.vh.StartSAS(ctx, txn); err != nil {
 		l.finish(fmt.Errorf("starting SAS: %w", err))
 	}

@@ -70,7 +70,7 @@ type readOut struct {
 }
 
 // New registers every tool on a new server.
-func New(c *matrix.Client, version string) *Server {
+func New(c *matrix.Client, l *matrix.Listener, version string) *Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "go-element", Version: version}, &mcp.ServerOptions{
 		Instructions: "Matrix/Element as the logged-in user. Writes are dry runs until send is called with yes=true; " +
 			"send only what the user asked for, to the room they named, and check the member count first (a DM has 2).",
@@ -165,7 +165,46 @@ func New(c *matrix.Client, version string) *Server {
 			return nil, readOut{Room: string(rid), EventID: string(ev)}, nil
 		})
 
+	if l != nil {
+		addVerificationTools(srv, c, l)
+	}
+
 	return &Server{srv: srv}
+}
+
+type matchArgs struct {
+	Match bool `json:"match" jsonschema:"true only if the user confirmed the emojis are identical on both screens; false cancels"`
+}
+
+type verifyOut struct {
+	matrix.VerificationState
+	Verified bool   `json:"verified"`
+	Note     string `json:"note,omitempty"`
+}
+
+func addVerificationTools(srv *mcp.Server, c *matrix.Client, l *matrix.Listener) {
+	snapshot := func(ctx context.Context, note string) (verifyOut, error) {
+		st, err := c.VerificationStatus(ctx)
+		if err != nil {
+			return verifyOut{}, fmt.Errorf("status: %w", err)
+		}
+		return verifyOut{VerificationState: l.State(), Verified: st.Verified, Note: note}, nil
+	}
+
+	mcp.AddTool(srv, &mcp.Tool{Name: "verification", Description: "Show this device's verification state. A request made in Element (Settings > Sessions > go-element > Verify session) is accepted automatically; when phase is comparing, show the user the emojis and ask whether they match before calling verification_confirm."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ empty) (*mcp.CallToolResult, verifyOut, error) {
+			out, err := snapshot(ctx, "")
+			return nil, out, err
+		})
+
+	mcp.AddTool(srv, &mcp.Tool{Name: "verification_confirm", Description: "Answer a pending emoji comparison. Call it only after the user said the emojis match; never answer for them."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, a matchArgs) (*mcp.CallToolResult, verifyOut, error) {
+			if err := l.Answer(a.Match); err != nil {
+				return nil, verifyOut{}, fmt.Errorf("answer: %w", err)
+			}
+			out, err := snapshot(ctx, "answer sent; call verification to see the outcome")
+			return nil, out, err
+		})
 }
 
 // Run serves MCP over stdio until the context ends.
