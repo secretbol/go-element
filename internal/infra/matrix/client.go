@@ -39,6 +39,12 @@ type Client struct {
 // Open loads the stored session, starts syncing and waits for the first sync,
 // which also collects the room keys waiting for this device.
 func Open(ctx context.Context, dir string) (*Client, error) {
+	return OpenWith(ctx, dir, nil)
+}
+
+// OpenWith is Open, but calls setup after the crypto helper is ready and before
+// syncing starts, so event handlers can be registered without racing the syncer.
+func OpenWith(ctx context.Context, dir string, setup func(*Client) error) (*Client, error) {
 	s, err := LoadSession(dir)
 	if err != nil {
 		return nil, err
@@ -75,6 +81,13 @@ func Open(ctx context.Context, dir string) (*Client, error) {
 	cli.Crypto = helper
 	c.crypto = helper
 	c.dec = helper
+
+	if setup != nil {
+		if err := setup(c); err != nil {
+			_ = helper.Close()
+			return nil, fmt.Errorf("setup: %w", err)
+		}
+	}
 
 	syncCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c.cancel = cancel

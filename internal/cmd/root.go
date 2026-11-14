@@ -36,7 +36,7 @@ func Execute() {
 				Sources: cli.EnvVars("GO_ELEMENT_DIR"),
 			},
 		},
-		Commands: []*cli.Command{loginCommand(), mcpCommand(), whoamiCommand(), importKeysCommand(), verifyCommand()},
+		Commands: []*cli.Command{loginCommand(), mcpCommand(), whoamiCommand(), importKeysCommand(), verifyCommand(), listenCommand()},
 	}
 
 	// MCP speaks on stdout, so every log line goes to stderr.
@@ -161,6 +161,56 @@ func verifyCommand() *cli.Command {
 			return nil
 		},
 	}
+}
+
+func listenCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "listen",
+		Usage: "wait for a verification request from your other Element session, show the emojis, and confirm on y",
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			var l *matrix.Listener
+			c, err := matrix.OpenWith(ctx, cmd.String("dir"), func(c *matrix.Client) error {
+				var err error
+				l, err = matrix.Listen(c, askEmojis)
+				return err
+			})
+			if err != nil {
+				return fmt.Errorf("open: %w", err)
+			}
+			defer c.Close()
+			fmt.Fprintf(os.Stderr, "listening as %s device %s: in Element open Settings > Sessions > go-element > Verify session\n", c.UserID(), c.DeviceID())
+			if err := l.Wait(ctx); err != nil {
+				return err
+			}
+			st, err := c.VerificationStatus(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("verification complete, verified %t\n", st.Verified)
+			return nil
+		},
+	}
+}
+
+// askEmojis prints the SAS and reads y/N from the terminal.
+func askEmojis(_ context.Context, emojis []rune, descriptions []string, decimals []int) (bool, error) {
+	fmt.Fprintln(os.Stderr, "Compare with Element:")
+	for i, e := range emojis {
+		d := ""
+		if i < len(descriptions) {
+			d = descriptions[i]
+		}
+		fmt.Fprintf(os.Stderr, "  %c  %s\n", e, d)
+	}
+	if len(decimals) > 0 {
+		fmt.Fprintf(os.Stderr, "  numbers: %v\n", decimals)
+	}
+	fmt.Fprint(os.Stderr, "Do they match? [y/N] ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return false, fmt.Errorf("reading answer: %w", err)
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "y"), nil
 }
 
 func whoamiCommand() *cli.Command {
